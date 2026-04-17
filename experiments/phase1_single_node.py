@@ -23,22 +23,25 @@ from eml_neuron.symbolic import snap_and_verify, to_sympy
 _x = sp.Symbol("x")
 
 TARGETS = {
+    # exp(x) = eml(x, 1)  — minimal depth is 1
     "exp": {
         "fn": torch.exp,
         "sympy": sp.exp(_x),
-        "x_range": (0.5, 3.0),
-        "depth": 2,
+        "x_range": (0.3, 2.0),
+        "depth": 1,
     },
+    # ln(x) — exact EML depth unknown, start at 3 and let curriculum find it
     "ln": {
         "fn": torch.log,
         "sympy": sp.log(_x),
-        "x_range": (0.5, 5.0),
-        "depth": 2,
+        "x_range": (0.5, 4.0),
+        "depth": 3,
     },
+    # x^2 = exp(2*ln(x)) — deeper composition required
     "square": {
         "fn": lambda x: x ** 2,
         "sympy": _x ** 2,
-        "x_range": (0.5, 3.0),
+        "x_range": (0.5, 2.5),
         "depth": 4,
     },
 }
@@ -57,47 +60,68 @@ def evaluate_snap(hard_node, target_fn, x_range, n=1000):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", choices=list(TARGETS), default="exp")
-    parser.add_argument("--epochs", type=int, default=2000)
-    parser.add_argument("--lr", type=float, default=1e-2)
-    parser.add_argument("--tau_start", type=float, default=2.0)
-    parser.add_argument("--tau_end", type=float, default=0.05)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--epochs", type=int, default=4000)
+    parser.add_argument("--lr", type=float, default=3e-3)
+    parser.add_argument("--tau_start", type=float, default=3.0)
+    parser.add_argument("--tau_end", type=float, default=0.02)
+    parser.add_argument("--seeds", type=int, default=5,
+                        help="number of random restarts to try")
     args = parser.parse_args()
-
-    torch.manual_seed(args.seed)
 
     cfg = TARGETS[args.target]
     print(f"\n{'='*60}")
     print(f"  Target: {args.target}(x) = {cfg['sympy']}")
-    print(f"  Depth:  {cfg['depth']}")
+    print(f"  Depth:  {cfg['depth']}  |  Seeds: {args.seeds}")
     print(f"{'='*60}\n")
 
-    soft_node = train_single_node(
-        target_fn=cfg["fn"],
-        depth=cfg["depth"],
-        epochs=args.epochs,
-        lr=args.lr,
-        tau_start=args.tau_start,
-        tau_end=args.tau_end,
-        x_range=cfg["x_range"],
-    )
+    import torch.nn.functional as F
 
-    print("\n--- Snapping to hard topology ---")
-    hard_node, expr, is_exact = snap_and_verify(soft_node, cfg["sympy"])
+    best_result = None
+    best_err = float("inf")
 
-    print(f"  Tree depth:   {hard_node.depth()}")
-    print(f"  Node count:   {hard_node.node_count()}")
-    print(f"  Expression:   {expr}")
+    for seed in range(args.seeds):
+        torch.manual_seed(seed)
+        print(f"--- seed {seed} ---")
+
+        soft_node = train_single_node(
+            target_fn=cfg["fn"],
+            depth=cfg["depth"],
+            epochs=args.epochs,
+            lr=args.lr,
+            tau_start=args.tau_start,
+            tau_end=args.tau_end,
+            x_range=cfg["x_range"],
+            verbose=(seed == 0),  # only print progress for first seed
+        )
+
+        root_logits = soft_node.logits.detach()
+        root_probs = F.softmax(root_logits / soft_node.tau, dim=0)
+        labels = ["1", "x", "eml"][:len(root_probs)]
+        probs_str = "  ".join(f"{l}={p:.3f}" for l, p in zip(labels, root_probs.tolist()))
+        print(f"  root: {probs_str}")
+
+        hard_node, expr, is_exact = snap_and_verify(soft_node, cfg["sympy"])
+        err = evaluate_snap(hard_node, cfg["fn"], cfg["x_range"])
+        print(f"  snap: {expr}  |  max_err={err:.2e}  exact={is_exact}")
+
+        if err < best_err:
+            best_err = err
+            best_result = (hard_node, expr, is_exact, seed)
+
+        if best_err < 1e-5:
+            print("\n  Early stop: exact match found.")
+            break
+
+    print(f"\n{'='*60}")
+    print(f"  BEST RESULT (seed {best_result[3]})")
+    print(f"  Expression:   {best_result[1]}")
     print(f"  Target:       {cfg['sympy']}")
-    print(f"  Exact match:  {is_exact}")
-
-    max_err = evaluate_snap(hard_node, cfg["fn"], cfg["x_range"])
-    print(f"  Max |error|:  {max_err:.2e}")
-
-    if max_err < 1e-5:
-        print("\n  RESULT: machine-epsilon accuracy after snap ✓")
+    print(f"  Exact match:  {best_result[2]}")
+    print(f"  Max |error|:  {best_err:.2e}")
+    if best_err < 1e-5:
+        print("  STATUS: machine-epsilon accuracy after snap ✓")
     else:
-        print(f"\n  RESULT: snap error above threshold ({max_err:.2e}) ✗")
+        print(f"  STATUS: snap error above threshold ✗")
 
 
 if __name__ == "__main__":

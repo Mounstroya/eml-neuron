@@ -8,8 +8,11 @@ A single node has three routing choices:
   1 -> terminal: x
   2 -> recursive: eml(left_child, right_child)
 
-SoftEMLNode uses a Gumbel-softmax over these choices so topology
-gradients flow during training.
+SoftEMLNode uses temperature-scaled softmax routing so topology
+gradients flow during training. Gumbel noise is deliberately avoided:
+the stochasticity destabilizes training when eml outputs can explode.
+Intermediate eml values are clamped to [-50, 50] to prevent inf/nan
+from propagating through the soft convex combination.
 """
 
 import torch
@@ -17,11 +20,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-EPS = 1e-7  # clamp floor for ln arguments
+EPS = 1e-7       # clamp floor for ln arguments
+OUT_CLAMP = 50.0 # hard clamp on intermediate eml outputs
 
 
 def _eml(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    return torch.exp(a) - torch.log(b.clamp(min=EPS))
+    return torch.exp(a.clamp(max=OUT_CLAMP)) - torch.log(b.clamp(min=EPS))
 
 
 class SoftEMLNode(nn.Module):
@@ -33,8 +37,8 @@ class SoftEMLNode(nn.Module):
     At evaluation time call .snap() to get the hard discrete choice.
 
     Args:
-        tau: Gumbel-softmax temperature (annealed during training).
-        depth: Tree depth below this node (0 = leaf forced to terminal).
+        tau: softmax temperature (annealed toward 0 during training).
+        depth: tree depth below this node (0 = leaf, only terminals).
     """
 
     def __init__(self, tau: float = 1.0, depth: int = 1):
@@ -43,21 +47,24 @@ class SoftEMLNode(nn.Module):
         self.tau = tau
 
         # logits: [p_one, p_x, p_eml]
-        # if depth==0 the eml branch is unavailable (would need children)
+        # depth==0 nodes can only be terminals
         n_choices = 2 if depth == 0 else 3
-        self.logits = nn.Parameter(torch.zeros(n_choices))
+        # inner nodes start biased toward eml; leaves are uniform
+        init = torch.zeros(n_choices)
+        if n_choices == 3:
+            init[2] = 1.0   # start preferring eml over terminals
+            init[0] = -1.0  # discourage constant `1`
+        self.logits = nn.Parameter(init)
 
         if depth > 0:
             self.left = SoftEMLNode(tau=tau, depth=depth - 1)
             self.right = SoftEMLNode(tau=tau, depth=depth - 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        probs = F.gumbel_softmax(self.logits, tau=self.tau, hard=False)
-
+        probs = F.softmax(self.logits / self.tau, dim=0)
         ones = torch.ones_like(x)
 
         if self.depth == 0:
-            # only terminals available
             p_one, p_x = probs[0], probs[1]
             return p_one * ones + p_x * x
 
@@ -65,13 +72,21 @@ class SoftEMLNode(nn.Module):
 
         left_val = self.left(x)
         right_val = self.right(x)
-        eml_val = _eml(left_val, right_val)
+        # clamp before mixing so a bad subtree can't poison the gradient
+        eml_val = _eml(left_val, right_val).clamp(-OUT_CLAMP, OUT_CLAMP)
 
         return p_one * ones + p_x * x + p_eml * eml_val
 
+    def entropy(self) -> torch.Tensor:
+        """Sum of routing entropy across all nodes in this subtree."""
+        probs = F.softmax(self.logits / max(self.tau, 1e-6), dim=0)
+        h = -(probs * (probs + 1e-9).log()).sum()
+        if self.depth > 0:
+            h = h + self.left.entropy() + self.right.entropy()
+        return h
+
     def set_tau(self, tau: float) -> None:
         self.tau = tau
-        self.logits  # touch to keep reference
         if self.depth > 0:
             self.left.set_tau(tau)
             self.right.set_tau(tau)
