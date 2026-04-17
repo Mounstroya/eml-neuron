@@ -29,7 +29,7 @@ def train_single_node(
     x_range: tuple[float, float] = (0.5, 2.5),
     log_every: int = 500,
     grad_clip: float = 1.0,
-    entropy_beta_end: float = 0.05,
+    entropy_beta_end: float = 0.0,  # kept for API compat, no longer used
     device: str = "cpu",
     verbose: bool = True,
 ) -> SoftEMLNode:
@@ -68,8 +68,6 @@ def train_single_node(
     for epoch in range(epochs):
         tau = tau_schedule(epoch)
         node.set_tau(tau)
-        # entropy penalty grows linearly from 0 to entropy_beta_end
-        beta = entropy_beta_end * (epoch / epochs)
 
         x = torch.empty(n_samples, device=device).uniform_(*x_range)
         y_target = target_fn(x)
@@ -79,8 +77,7 @@ def train_single_node(
             continue
 
         mse = nn.functional.mse_loss(y_pred, y_target)
-        # penalize high-entropy (diffuse) routing distributions
-        loss = mse + beta * node.entropy()
+        loss = mse
 
         optimizer.zero_grad()
         loss.backward()
@@ -95,7 +92,7 @@ def train_single_node(
         if verbose and (epoch + 1) % log_every == 0:
             print(
                 f"epoch {epoch+1:>5}  mse={mse.item():.4e}  "
-                f"best={best_loss:.4e}  tau={tau:.4f}  beta={beta:.4f}"
+                f"best={best_loss:.4e}  tau={tau:.4f}"
             )
 
     if best_state is not None:

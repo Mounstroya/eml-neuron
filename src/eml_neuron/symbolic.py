@@ -8,7 +8,7 @@ it is symbolically equivalent to a target expression.
 import sympy as sp
 from .node import EMLNode
 
-_x = sp.Symbol("x")
+_x = sp.Symbol("x", positive=True)  # EML requires positive ln arguments
 _EPS = sp.Float("1e-7")
 
 

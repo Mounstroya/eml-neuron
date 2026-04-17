@@ -49,11 +49,18 @@ class SoftEMLNode(nn.Module):
         # logits: [p_one, p_x, p_eml]
         # depth==0 nodes can only be terminals
         n_choices = 2 if depth == 0 else 3
-        # inner nodes start biased toward eml; leaves are uniform
         init = torch.zeros(n_choices)
         if n_choices == 3:
-            init[2] = 1.0   # start preferring eml over terminals
-            init[0] = -1.0  # discourage constant `1`
+            # moderate eml preference; don't over-penalize constants since
+            # the correct expression may need `1` as a child (e.g. eml(x,1))
+            init[2] = 2.0
+            init[0] = -1.0
+        else:
+            # leaves start strongly at `x` so all subtrees produce a live
+            # signal from the start; avoids eml(noise, noise) explosions that
+            # cause gradients to flee eml branches on the first few steps
+            init[0] = -5.0   # suppress constant `1`
+            init[1] = 5.0    # start at `x`
         self.logits = nn.Parameter(init)
 
         if depth > 0:
