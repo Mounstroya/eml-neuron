@@ -23,7 +23,7 @@ import sympy as sp
 sys.path.insert(0, "src")
 from eml_neuron.train import train_single_node
 from eml_neuron.symbolic import snap_and_verify, to_sympy
-from eml_neuron.exhaustive import exhaustive_search
+from eml_neuron.exhaustive import beam_search, exhaustive_search
 
 _x = sp.Symbol("x", positive=True)
 
@@ -101,17 +101,18 @@ def run_gradient_search(cfg, args):
 
 
 def run_exhaustive_search(cfg):
-    print("\n[2/2] Exhaustive enumeration fallback")
-    node, err = exhaustive_search(
+    print("\n[2/2] Beam search fallback")
+    node, err, depth_found = beam_search(
         target_fn=cfg["fn"],
         max_depth=cfg["depth"],
         x_range=cfg["x_range"],
+        verbose=True,
     )
     if node is None:
         return None, float("inf")
     expr = sp.simplify(to_sympy(node))
     is_exact = sp.simplify(expr - cfg["sympy"]) == sp.Integer(0)
-    print(f"  best expression: {expr}  err={err:.2e}  exact={is_exact}")
+    print(f"  best: {expr}  err={err:.2e}  depth={depth_found}  exact={is_exact}")
     return (node, expr, is_exact, -1), err
 
 
